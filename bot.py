@@ -1,11 +1,15 @@
 import os
 import io
+import time
+import threading
 import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,6 +21,25 @@ from telegram.ext import (
 )
 
 warnings.filterwarnings('ignore')
+
+# ==================== ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER ($0 FREE TIER) ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - SignalX Bot is Running")
+
+    def log_message(self, format, *args):
+        pass  # Отключаем логгирование HTTP запросов, чтобы не забивать консоль
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Запускаем веб-сервер в фоновом потоке, чтобы Render думал, что это веб-сайт
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # ==================== НАСТРОЙКИ ====================
 TELEGRAM_BOT_TOKEN = "8835644935:AAHVh6DidbRlyN1byuWRuHIdO8Dqi9K_LTw"
@@ -97,19 +120,33 @@ def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int
     return adx, plus_di, minus_di
 
 def get_historical_data(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    try:
-        klines = binance_client.get_klines(symbol=CRYPTO_LIST[symbol], interval=interval, limit=limit)
-        df = pd.DataFrame(klines, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
-        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-        return df
-    except Exception:
-        return pd.DataFrame()
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # Небольшая задержка перед запросом, чтобы не превышать лимиты Binance
+            time.sleep(1.5)
+            klines = binance_client.get_klines(symbol=CRYPTO_LIST[symbol], interval=interval, limit=limit)
+            df = pd.DataFrame(klines, columns=[
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+            df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
+            df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+            return df
+        except BinanceAPIException as e:
+            if e.code == -1003:
+                print(f"⚠️ Binance Rate Limit (код -1003). Ожидание 10 сек... Попытка {attempt + 1}/{retries}")
+                time.sleep(10)
+            else:
+                print(f"Ошибка Binance API: {e}")
+                break
+        except Exception as e:
+            print(f"Ошибка при получении данных: {e}")
+            break
+            
+    return pd.DataFrame()
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -376,7 +413,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         df = get_historical_data(symbol, TIMEFRAMES[tf])
         if df.empty:
-            await query.message.reply_text("❌ Ошибка при получении данных от биржи.")
+            await query.message.reply_text("❌ Ошибка при получении данных от биржи. Попробуйте еще раз через 10 секунд.")
             return
             
         df = calculate_indicators(df)
