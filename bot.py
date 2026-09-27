@@ -22,7 +22,7 @@ from telegram.ext import (
 
 warnings.filterwarnings('ignore')
 
-# ==================== ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ RENDER ($0 FREE TIER) ====================
+# ==================== ФОНОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ($0 FREE TIER) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -31,15 +31,16 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - SignalX Bot is Running")
 
     def log_message(self, format, *args):
-        pass  # Отключаем логгирование HTTP запросов, чтобы не забивать консоль
+        pass
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"🌐 Фоновый веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# Запускаем веб-сервер в фоновом потоке, чтобы Render думал, что это веб-сайт
-threading.Thread(target=run_dummy_server, daemon=True).start()
+# Запуск сервера портов в отдельном потоке
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ==================== НАСТРОЙКИ ====================
 TELEGRAM_BOT_TOKEN = "8835644935:AAHVh6DidbRlyN1byuWRuHIdO8Dqi9K_LTw"
@@ -48,10 +49,8 @@ REFERRAL_LINK = "https://www.bybit.com/invite?ref=0OKBQEA&medium=referral&utm_ca
 
 MIN_ADX_FOR_TREND = 25
 
-# База данных зарегистрированных пользователей
 REGISTERED_USERS = set()
 
-# Список криптовалют
 CRYPTO_LIST = {
     'BTC': 'BTCUSDT', 'ETH': 'ETHUSDT', 'ADA': 'ADAUSDT', 'XRP': 'XRPUSDT',
     'SOL': 'SOLUSDT', 'DOGE': 'DOGEUSDT', 'LINK': 'LINKUSDT', 'AAVE': 'AAVEUSDT', 
@@ -123,7 +122,6 @@ def get_historical_data(symbol: str, interval: str, limit: int = 500) -> pd.Data
     retries = 3
     for attempt in range(retries):
         try:
-            # Небольшая задержка перед запросом, чтобы не превышать лимиты Binance
             time.sleep(1.5)
             klines = binance_client.get_klines(symbol=CRYPTO_LIST[symbol], interval=interval, limit=limit)
             df = pd.DataFrame(klines, columns=[
@@ -137,7 +135,7 @@ def get_historical_data(symbol: str, interval: str, limit: int = 500) -> pd.Data
             return df
         except BinanceAPIException as e:
             if e.code == -1003:
-                print(f"⚠️ Binance Rate Limit (код -1003). Ожидание 10 сек... Попытка {attempt + 1}/{retries}")
+                print(f"⚠️ Binance Rate Limit. Пауза 10 сек... Попытка {attempt + 1}/{retries}")
                 time.sleep(10)
             else:
                 print(f"Ошибка Binance API: {e}")
@@ -418,40 +416,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         df = calculate_indicators(df)
         
-        # 1. График
         chart_buf = generate_chart(df, symbol)
         
-        # 2. Разделы отчета
         analysis_report = build_analysis_report(df, symbol, tf)
         entry_report = build_entry_points_report(df)
         orders_report = build_limit_orders_report(df, symbol, tf)
         
-        # Отправка отчетов
         await query.message.reply_photo(photo=chart_buf, caption=f"📈 **График теханализа {symbol} ({tf})**", parse_mode="Markdown")
         await query.message.reply_text(analysis_report, parse_mode="Markdown")
         await query.message.reply_text(entry_report, parse_mode="Markdown")
         
-        # Кнопка для перезапуска
         back_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Выбрать другую монету", callback_data="back_to_coins")]
         ])
         await query.message.reply_text(orders_report, parse_mode="Markdown", reply_markup=back_keyboard)
 
-    # =============== МОДЕРАЦИЯ АДМИНИСТРАТОРОМ ===============
     elif query.data.startswith("approve_"):
         target_user_id = int(query.data.split("_")[1])
         REGISTERED_USERS.add(target_user_id)
         
-        # Изменяем сообщение администратору
         await query.edit_message_text(f"{query.message.text}\n\n✅ **ОДОБРЕНО**")
         
-        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 chat_id=target_user_id,
                 text="🎉 **Ваша регистрация успешно подтверждена!**\nТеперь вам доступен полный функционал анализа SignalX BYB."
             )
-            # Отправляем меню выбора монет
             keyboard = []
             keys = list(CRYPTO_LIST.keys())
             for i in range(0, len(keys), 3):
@@ -469,10 +459,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("reject_"):
         target_user_id = int(query.data.split("_")[1])
         
-        # Изменяем сообщение администратору
         await query.edit_message_text(f"{query.message.text}\n\n❌ **ОТКЛОНЕНО**")
         
-        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 chat_id=target_user_id,
@@ -492,7 +480,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_uid'] = False
             await update.message.reply_text("⏳ **Заявка отправлена на проверку.**\nАдминистратор проверит ваш UID и откроет доступ в ближайшее время.")
             
-            # Отправляем заявку администратору
             admin_text = (
                 f"📥 **Новая заявка на доступ SignalX BYB!**\n\n"
                 f"👤 Пользователь: {user_name} ({username})\n"
